@@ -1,4 +1,4 @@
-# Ayuda de seerr-bridge 1.2.2
+# Ayuda de seerr-bridge 1.2.8
 
 seerr-bridge es un **puente** entre **Seerr** (donde los clientes piden películas y series) y **XtreamFilter** (catálogo del proveedor IPTV y cola de descargas). Hace el trabajo que normalmente harían Radarr y Sonarr, pero usando el catálogo del proveedor.
 
@@ -12,9 +12,9 @@ Página de control: `http://IP-DEL-SERVIDOR:5056`
 Cliente pide "Duna" en Seerr  → la petición queda PENDIENTE
    ▼  (el puente revisa Seerr cada 5 minutos)
 Puente busca por TMDB en el catálogo del proveedor (XtreamFilter)
-   ├─ Hay versión ES (sin 4K)        → la APRUEBA en Seerr
-   ├─ No existe en el catálogo        → la RECHAZA y avisa al cliente
-   └─ Existe pero no en ES            → la RECHAZA y avisa al cliente
+   ├─ Hay versión en tu idioma (sin 4K) → la APRUEBA en Seerr
+   ├─ No existe en el catálogo          → la RECHAZA y avisa al cliente
+   └─ Existe pero no en tu idioma       → la RECHAZA y avisa al cliente
    ▼
 Puente comprueba Jellyfin y la cola de XtreamFilter (no descarga lo que ya tienes)
    ▼
@@ -34,17 +34,22 @@ De la **lista de títulos de XtreamFilter en formato Xtream Codes** (`player_api
 
 ### Cómo elige la versión
 
-Busca por el **número de TMDB** (no por el nombre: da igual que el título esté en inglés o en español) y elige, en este orden:
+Busca por el **número de TMDB** (da igual que el título esté en inglés o en español) y, entre las versiones encontradas (siempre sin 4K si la regla está activa):
 
-1. **Grupo ES** (nombre que empieza por `ES -`, `ES-DO -`…): se acepta directamente, sin analizar. En estos grupos el audio puede estar etiquetado como inglés pero es español.
-2. **Grupo LA** (latino: `LA -`, grupos `LATINO …`): se acepta directamente.
-3. **Otra versión con audio en español** (NF, D+, EN…): se analizan los archivos.
-4. **Otra versión con subtítulos completos en español** (los forzados no cuentan).
-5. Si no hay nada: no disponible en español (se rechaza o queda esperando).
+```
+¿Alguna versión empieza por un prefijo del idioma preferido? (título o grupo)
+   ├─ Sí → se elige y se deja de buscar (no se analiza nada)
+   └─ No → ¿alguna tiene audio en los idiomas indicados (p. ej. SPA)?
+             ├─ Sí → se elige
+             └─ No → ¿alguna tiene subtítulos completos en los idiomas indicados?
+                       ├─ Sí → se elige
+                       └─ No → se rechaza (o queda "Esperando" si es del administrador)
+```
 
-Siempre sin 4K (si la regla está activa). Si hay varias válidas en un paso, la más reciente.
-
-**Análisis (pasos 3 y 4)**: el puente lee las pistas de audio y subtítulos de cada versión con **ffprobe** (1-2 s por versión, como máximo 8 versiones por petición; en series, el primer episodio de la temporada pedida). Como el proveedor admite **una sola conexión**, si XtreamFilter está descargando, antes de analizar **pausa la cola** de XtreamFilter, espera 5 s y a que la descarga en curso se detenga, analiza, espera 15 s más (para que el proveedor libere la conexión) y la **reanuda** (solo si la pausó él). Si el análisis corta la conexión de la descarga que estaba en pausa y esta termina con error, se reintenta en la siguiente revisión (opción "reintentar las descargas con error"). El resultado del análisis de cada versión se recuerda 24 h, para no volver a pausar la cola por lo mismo (p. ej. al pulsar "Reprocesar"). En el detalle de la petición se indica el motivo, p. ej. *"NF-DO - Furioza (2021) | NETFLIX MOVIES DOLBY AUDIO (audio en español)"*.
+- **Prefijos** (p. ej. `"ES -","LA -","ESP","ES-"`): se acepta toda versión cuyo título o grupo **empiece** por uno de ellos, tal cual están escritos. Si varias coinciden, gana el prefijo que está antes en la lista y después la más reciente.
+- **Audio y subtítulos**: se leen las pistas de cada versión con **ffprobe** (1-2 s por versión, máximo 8 por petición; en series, el primer episodio de la temporada pedida). Los códigos (`SPA`, `ES`…) se comparan con el idioma de cada pista, sin distinguir mayúsculas. Según el ajuste, cuenta **cualquier pista**, **primero la principal** o **solo la principal** (la marcada por defecto, o la primera).
+- **Conexión con el proveedor**: el proveedor admite una sola conexión y una descarga a medias la ocupa **aunque esté en pausa**. Por eso, si hay una descarga a medias, antes de consultar al proveedor el puente pausa la cola (para que no empiece otra), **cancela** esa descarga, hace sus consultas, la **reintenta** (vuelve a "en espera" en su sitio y empieza de cero; no cuenta como reintento) y reanuda la cola si la pausó él. Si la cola la pausaste tú, la deja pausada. Si no hay ninguna descarga a medias, no toca nada. Las pistas de cada versión se recuerdan 24 h.
+- En el **Detalle** de la petición siempre se indica el motivo de la elección: *"(prefijo «ES -» en el grupo)"*, *"(audio SPA)"* o *"(subtítulos SPA)"*, y si hubo análisis, su resultado, p. ej. *"Sin versión con prefijo del idioma preferido. Analizada 1 versión: NF-DO - Furioza (audio SPA ✓)"*. Si coincide un prefijo no se analiza el audio (el prefijo basta).
 
 ### Cómo evita duplicados
 
@@ -156,11 +161,14 @@ Es el catálogo que usa el puente (películas, series y episodios), ya filtrado 
 ### Reglas
 | Ajuste | Explicación |
 |---|---|
-| Idioma (prefijo en el catálogo) | `ES` = solo versiones cuyo nombre empieza por `ES -` (o `ES-DO -`, etc.) |
+| Idioma preferido: prefijos | Lista entre comillas y separada por comas (p. ej. `"ES -","LA -","ESP","ES-"`). Toda versión cuyo título o grupo **empiece** por uno de estos textos, tal cual, se acepta sin analizar. El orden es la preferencia. `"ES"` incluye `ES - …`, `ES-DO - …` y grupos `ESPAÑA …` (y cualquier cosa que empiece por ES); `"ES -"` es más estricto |
+| Idiomas del audio | Códigos de idioma de la pista de audio, separados por comas (p. ej. `SPA` o `SPA, ES`). Sugerencias: SPA/ES español, ENG/EN inglés, FRE/FRA francés, POR/PT portugués, ITA/IT italiano, GER/DEU alemán |
+| Qué pista de audio cuenta | Cualquier pista · Primero la principal, luego cualquiera · Solo la principal |
+| Idiomas de los subtítulos | Igual que el audio; solo cuentan los subtítulos completos (no forzados) |
 | Excluir versiones 4K | No elige versiones `4K-…` ni grupos ⁴ᴷ |
 | Poner lo pedido en Seerr al principio de la cola | Adelanta lo pedido a todo lo que espera en XtreamFilter |
-| Buscar otras versiones con audio en español | Si no hay versión ES ni LA, analiza las demás versiones (pausando la cola unos segundos) y elige una con audio en español |
-| …o con subtítulos completos en español | Si ninguna tiene audio en español, acepta una con subtítulos completos en español |
+| Si no coincide ningún prefijo, buscar otras versiones con audio en los idiomas indicados | Activa el análisis de audio (pausa la cola unos segundos si XtreamFilter está descargando) |
+| …o con subtítulos completos en los idiomas indicados | Si ninguna versión tiene el audio, acepta una con subtítulos completos en esos idiomas |
 | En cada revisión, reintentar las descargas con error | En cada revisión (cada "Revisar Seerr cada (minutos)"), mira la cola de XtreamFilter y reintenta todo lo que esté con error, cancelado o con fallo al mover, sea de Seerr o no |
 | Reintentos por descarga | Cuántas veces se reintenta cada elemento (por defecto 3). Al agotarse se deja con error y se anota en el registro (y en el Detalle si es de Seerr). Los contadores se guardan aunque el puente se reinicie |
 | Series en emisión: añadir al seguimiento | Crea el seguimiento en XtreamFilter para bajar episodios nuevos |
@@ -198,27 +206,26 @@ Todos los ajustes tienen un botón **Probar conexión** (Seerr, Jellyfin, Xtream
 
 ## 4. Búsqueda de episodios que faltan
 
-Para cada serie que hay en Jellyfin (es decir, en el disco):
+Una vez al día, dentro de la ventana horaria configurada (o con "Buscar ahora"):
 
 ```
-Episodios que tiene el proveedor (misma versión que la carpeta)
-  − los que están en Jellyfin (disco)
-  − los que están en la cola de XtreamFilter (en cualquier estado, también completados)
-  = episodios que faltan (huecos y temporadas enteras)
+1. Si hay algo en la cola, se pausa y se esperan 15 s (conexión libre). Si había una descarga a medias
+   queda en pausa (no se cancela). Al terminar: se esperan 15 s, si había una descarga en curso se
+   reintentan las descargas con error (según la configuración de reintentos) y se reanuda la cola.
+   Solo si la pausó el puente; si la pausaste tú, no se toca
+2. Series de Jellyfin (disco), sin las ignoradas ni las carpetas vacías
+3. Sin número de TMDB en Jellyfin → no se procesa; aparece en la lista como "FALTA TMDB"
+4. Completa según Seerr (compara Jellyfin con TMDB) → no se consulta al proveedor
+5. Parcial según Seerr → se consulta al proveedor su lista de episodios (una serie cada 5 s)
+6. Episodios del proveedor − Jellyfin − cola de XtreamFilter = episodios que faltan
 ```
 
-- **Solo series con episodios**: las carpetas vacías (sin ningún episodio en Jellyfin) no se revisan.
-- **Pausa la cola durante la búsqueda**: hay que pedir al proveedor la ficha de cada serie (~200 consultas) y el proveedor admite una sola conexión, así que, **si XtreamFilter está descargando**, la cola se pausa mientras dura (unos 2-3 minutos) y se reanuda al terminar. Si no está descargando (p. ej. fuera de su horario de descargas), no se toca la cola. Si el proveedor falla 5 veces seguidas, la búsqueda se cancela sin tocar las listas.
-- **Añadir automáticamente**: si la opción está activada, al terminar cada búsqueda se añade a la cola todo lo encontrado (al final de la cola).
-- **Series terminadas y completas**: si una serie está **terminada** según TMDB (Seerr) y la búsqueda no le encuentra nada que falte, se marca como **completa** y no se vuelve a revisar durante **7 días** (así la búsqueda consulta muchas menos series y la pausa de la cola es más corta). Las series en emisión, o terminadas con huecos, se revisan siempre. En la página se ve cuántas hay y el enlace **"revisar todas en la próxima búsqueda"** las vuelve a incluir. Si a una serie marcada se le borra un episodio, se detecta en la revisión semanal.
-
-- **Misma versión que la carpeta**: si la carpeta es `EN - Lioness`, busca en `EN - Lioness`. Nunca adivina: si el nombre del catálogo no coincide con la carpeta (salvo año/país), la serie aparece como "sin versión en el catálogo". También aparecen así las series de grupos que has quitado con las Filter Rules.
-- **También lo borrado**: un episodio que se descargó antes y ya no está en el disco se detecta como que falta. (Maintainerr borra series enteras: al desaparecer de Jellyfin la serie deja de revisarse, así que no se vuelve a descargar.)
-- Lo añadido va **al final** de la cola y **no** se sube en shrinkerr (lo coge su vigilante como cualquier descarga).
-- En cada búsqueda la lista se rehace: aparecen los episodios nuevos del proveedor y desaparece lo ya descargado.
+- **Misma versión que la carpeta**: si la carpeta es `EN - Lioness`, busca en `EN - Lioness`. Nunca adivina: si el nombre del catálogo no coincide con la carpeta (salvo año/país), la serie aparece como "sin versión en el catálogo".
+- **Despacio**: el proveedor puede **bloquear tu IP** si recibe muchas consultas seguidas (ocurrió con ~40 consultas en 26 s). Por eso se consulta una serie cada 5 s y solo las parciales según Seerr.
+- **Proveedor sin respuesta**: si falla 2 veces seguidas, la búsqueda se cancela sin tocar las listas (aviso en la página y en el registro).
+- **FALTA TMDB**: identifica la serie en Jellyfin (⋮ → Identificar) para que Seerr sepa si le faltan episodios.
+- **Añadir automáticamente**: si está activado, al terminar se añade a la cola todo lo encontrado (al final de la cola).
 - Las series que ya no existen (borradas del disco) se quitan solas de la lista y de las ignoradas.
-
----
 
 ## 5. Avisos a los clientes
 

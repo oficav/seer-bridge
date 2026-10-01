@@ -1,6 +1,90 @@
 # Historial de cambios
 
-Versiones de seerr-bridge, de la más reciente a la más antigua. La **versión 1** publicada corresponde a la **1.2.2**.
+Versiones de seerr-bridge, de la más reciente a la más antigua. La **versión 1** publicada corresponde a la **1.2.2**. La **versión 2** corresponde a la **1.2.8**.
+
+## 1.2.8
+
+#### Cambios en la búsqueda de episodios que faltan
+- **Antes**: si hay algo en la cola (en espera o descargando) y no está pausada, se pausa y se **esperan 15 s** para que la conexión quede libre.
+- **Después** (aunque la búsqueda falle a mitad), solo si la pausó el puente:
+  1. Se **esperan 15 s**.
+  2. Si antes de empezar había una **descarga en curso**, se **reintentan las descargas con error** según la configuración ("Reintentar las descargas con error" y "Reintentos por descarga"; cuentan para el límite).
+  3. Se **reanuda** la cola.
+- Si la cola la habías pausado tú, no se toca.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.7
+
+#### Cambios
+- Búsqueda de episodios que faltan: **ya no se aplaza** si XtreamFilter está descargando (la prueba real mostró que una descarga en curso no impide las consultas de catálogo; los fallos anteriores eran por el bloqueo de IP del proveedor).
+- En su lugar, **se pausa la cola de XtreamFilter mientras dura la búsqueda**, porque XtreamFilter arranca descargas por su cuenta cada minuto dentro de su horario. Si había una descarga a medias, queda en pausa (no se cancela). Al terminar, la cola se reanuda (solo si la pausó el puente; si la pausaste tú, se queda pausada). Así "Buscar ahora" es seguro a cualquier hora.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.6
+
+#### Motivo
+La búsqueda de episodios que faltan hizo ~40 consultas en 26 s al proveedor y **el proveedor bloqueó la IP** del servidor (comprobado: desde otra IP funcionaba).
+
+#### Cambios en la búsqueda de episodios que faltan
+- **Solo se consultan las series que Seerr marca como parcialmente disponibles**; las completas según Seerr no se consultan (sustituye a la memoria de "series terminadas y completas" de la 1.2.0).
+- Las series **sin TMDB** en Jellyfin no se procesan y aparecen en la lista como **"FALTA TMDB"**.
+- **Una consulta cada 5 s** (antes 0,2 s).
+- Si el proveedor falla **2 veces seguidas** (antes 5) se cancela la búsqueda sin tocar las listas.
+- Si XtreamFilter **está descargando algo**, la búsqueda no se hace y se muestra **"Descarga en curso en XtreamFilter. Búsqueda APLAZADA"** (no se cancela ninguna descarga). Dentro de la ventana horaria se reintenta en la siguiente revisión.
+- En la página: "Series completas según Seerr (no se consultan al proveedor): N".
+
+#### Otros
+- Si al reintentar una descarga cancelada XtreamFilter ya la había vuelto a poner en espera, se da por buena y se anota en el registro.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.5
+
+#### Cambios
+- **Se cancela la descarga a medias en lugar de solo pausar la cola**, siempre que el puente necesita consultar al proveedor (análisis de audio/subtítulos, episodios de una serie pedida en Seerr y búsqueda de episodios que faltan). Motivo: una descarga a medias ocupa la única conexión con el proveedor **aunque esté en pausa** (el proveedor rechazaba las consultas o cortaba la descarga).
+  1. Pausa la cola (para que no empiece la siguiente descarga).
+  2. Cancela la descarga a medias (`/api/cart/cancel`) → la conexión queda libre.
+  3. Hace las consultas.
+  4. Reintenta la descarga cancelada (`/api/cart/{id}/retry`): vuelve a "en espera" en su sitio y empieza de cero. No cuenta para "Reintentos por descarga".
+  5. Reanuda la cola (solo si la pausó el puente; si la pausaste tú, se queda pausada).
+- Si no hay ninguna descarga a medias, no se toca nada.
+- Se quitan las esperas de "5 s + comprobar progreso" y de 15 s antes de reanudar; queda una espera de 3 s tras cancelar.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.4
+
+#### Cambios
+- El **Detalle** (y el registro) indican siempre por qué se eligió la versión, también cuando es por prefijo:
+  - *"Añadida a la cola: ES-DO - Puñales por la espalda… | ES - PELÍCULAS ᴰᴼᴸᴮʸ ᴬᵁᴰᴵᴼ (prefijo «ES -» en el grupo)"*
+  - *"(prefijo «ES -» en el título)"*, *"(audio SPA)"*, *"(subtítulos SPA)"*.
+- Si coincide un prefijo no se analiza el audio (sin cambios): el prefijo basta.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.3
+
+#### Cambios
+- **Idioma preferido configurable** (⚙ Ajustes → Reglas), sustituye a "Idioma (prefijo en el catálogo)" y a la regla fija de latino:
+  - **Prefijos** (p. ej. `"ES -","LA -","ESP","ES-"`): se acepta directamente toda versión cuyo título o grupo empiece por uno de ellos, tal cual están escritos. El orden es la preferencia.
+  - **Idiomas del audio** (p. ej. `SPA`) y **de los subtítulos** (p. ej. `SPA`): códigos separados por comas, con sugerencias en la página.
+  - **Qué pista de audio cuenta**: cualquier pista / primero la principal, luego cualquiera / solo la principal.
+- Orden de búsqueda: prefijo → (si no) audio → (si no) subtítulos → (si no) rechazar.
+- Textos del registro y del Detalle con los códigos configurados (p. ej. "audio SPA ✓").
+- Las pistas analizadas se recuerdan 24 h y se evalúan con los ajustes vigentes (cambiar los códigos no obliga a volver a analizar).
+
+#### Cambio de comportamiento
+- Con el valor inicial `"ES -","LA -","ESP","ES-"` funciona como antes y además acepta directamente `ES-DO - …` y los grupos `ESPAÑA …`.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor. No hay que tocar el stack. Los nuevos ajustes toman su valor inicial.
 
 ## 1.2.2
 

@@ -1,4 +1,4 @@
-# Instalación de seerr-bridge 1.2.2
+# Instalación de seerr-bridge 1.2.8
 
 Guía para instalar seerr-bridge en Docker, desplegándolo como **stack de Portainer**.
 
@@ -8,10 +8,10 @@ Guía para instalar seerr-bridge en Docker, desplegándolo como **stack de Porta
 
 | Servicio | Para qué | Obligatorio |
 |---|---|---|
-| **Seerr** | Web donde los clientes piden películas y series | Sí |
-| **XtreamFilter** | Catálogo del proveedor IPTV y cola de descargas | Sí |
-| **Jellyfin** | Saber qué hay en el disco, actualizar la biblioteca y avisar a los clientes | Sí (muy recomendado) |
-| **shrinkerr** | Convertir (reducir) lo descargado | No |
+| **[Seerr](https://github.com/seerr-team/seerr)** | Web donde los clientes piden películas y series | Sí |
+| **[XtreamFilter](https://github.com/SpanishST/xtreamfilter)** | Catálogo del proveedor IPTV y cola de descargas | Sí |
+| **[Jellyfin](https://github.com/jellyfin/jellyfin)** | Saber qué hay en el disco, actualizar la biblioteca y avisar a los clientes | Sí (muy recomendado) |
+| **[shrinkerr](https://github.com/i-ial9000/shrinkerr)** | Convertir (reducir) lo descargado | No |
 | **Portainer** | Desplegar el stack | Recomendado |
 
 En Seerr **no** hay que configurar Radarr ni Sonarr: su trabajo lo hace el puente.
@@ -86,7 +86,7 @@ Comprueba que funciona abriendo en el navegador:
 http://IP-DEL-SERVIDOR:5056
 ```
 
-Debe aparecer la página de seerr-bridge con la etiqueta **v1.2.2** y **MODO PRUEBA**.
+Debe aparecer la página de seerr-bridge con la etiqueta **v1.2.8** y **MODO PRUEBA**.
 
 ---
 

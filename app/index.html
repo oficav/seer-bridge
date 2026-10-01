@@ -48,6 +48,8 @@
   .band-opt fieldset { background: color-mix(in srgb, var(--ok) 14%, var(--card)); border-color: color-mix(in srgb, var(--ok) 35%, var(--line)); }
   .band input[type=text], .band input[type=password], .band input[type=number], .band textarea { background: var(--card); }
   .grid-conn { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+  .band select:not([data-h]):not([data-m]):not([data-ap]) { width: 100%; font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
   .timepick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .timepick select { font: inherit; padding: 5px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); }
   .subhead { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
@@ -165,15 +167,27 @@
         <div class="grid grid-opt">
         <fieldset>
           <legend>Reglas</legend>
-          <label for="language_prefix">Idioma (prefijo en el catálogo)</label>
-          <input type="text" id="language_prefix" name="language_prefix">
+          <label for="lang_prefixes">Idioma preferido: prefijos de grupos o títulos</label>
+          <input type="text" id="lang_prefixes" name="lang_prefixes" placeholder='"ES -","LA -","ESP","ES-"'>
+          <div class="hint">Se acepta directamente toda versión cuyo <b>título o grupo empiece</b> por uno de estos textos, tal cual los escribas (con espacios y mayúsculas). Cada prefijo entre comillas y separados por comas; el orden es la preferencia. "ES" incluye «ES - …», «ES-DO - …» y grupos «ESPAÑA …» (y todo lo que empiece por ES, como «ESTRENOS»); "ES -" es más estricto.</div>
+          <label for="audio_langs">Idiomas del audio (si no coincide ningún prefijo)</label>
+          <input type="text" id="audio_langs" name="audio_langs" placeholder="SPA">
+          <label for="audio_track">Qué pista de audio cuenta</label>
+          <select id="audio_track" name="audio_track">
+            <option value="any">Cualquier pista</option>
+            <option value="main_first">Primero la principal, luego cualquiera</option>
+            <option value="main_only">Solo la principal</option>
+          </select>
+          <label for="sub_langs">Idiomas de los subtítulos (si tampoco coincide el audio)</label>
+          <input type="text" id="sub_langs" name="sub_langs" placeholder="SPA">
+          <div class="hint">Códigos de idioma de las pistas, separados por comas (sin distinguir mayúsculas). Sugerencias: <code>SPA</code> o <code>ES</code> español · <code>ENG</code> o <code>EN</code> inglés · <code>FRE</code> o <code>FRA</code> francés · <code>POR</code> o <code>PT</code> portugués · <code>ITA</code> o <code>IT</code> italiano · <code>GER</code> o <code>DEU</code> alemán. La pista principal es la marcada por defecto en el archivo (o la primera). Solo cuentan los subtítulos completos (no los forzados).</div>
           <label class="check"><input type="checkbox" name="exclude_4k"> Excluir versiones 4K</label>
           <label class="check"><input type="checkbox" name="prioritize"> Poner lo pedido en Seerr al principio de la cola</label>
           <label class="check"><input type="checkbox" name="auto_retry"> En cada revisión, reintentar las descargas con error de la cola de XtreamFilter (de Seerr o no)</label>
           <label for="retry_max">Reintentos por descarga</label>
           <input type="number" min="1" id="retry_max" name="retry_max">
-          <label class="check"><input type="checkbox" name="probe_audio"> Si no hay versión ES/LA, buscar otras versiones con audio en español (pausa la cola unos segundos para analizar)</label>
-          <label class="check"><input type="checkbox" name="probe_subs"> …o con subtítulos completos en español</label>
+          <label class="check"><input type="checkbox" name="probe_audio"> Si no coincide ningún prefijo, buscar otras versiones con audio en los idiomas indicados (pausa la cola unos segundos para analizar)</label>
+          <label class="check"><input type="checkbox" name="probe_subs"> …o con subtítulos completos en los idiomas indicados</label>
           <label class="check"><input type="checkbox" name="monitor_returning"> Series en emisión: añadir al seguimiento de XtreamFilter</label>
           <label for="retry_hours">Reintentar las peticiones de Seerr no encontradas cada (horas)</label>
           <input type="number" min="1" id="retry_hours" name="retry_hours">
@@ -323,20 +337,23 @@ async function loadLog() {
 
 async function loadMissing() {
   const m = await api("/api/missing");
-  $("missingInfo").textContent = m.running ? "Buscando… (tarda unos minutos)"
-    : (m.last_scan ? `Última búsqueda: ${fmt(m.last_scan)}` : "Todavía no se ha buscado.")
-      + (m.not_found && m.not_found.length ? ` · Sin versión en el catálogo: ${m.not_found.join(", ")}` : "");
+  $("missingInfo").innerHTML = (m.note ? `<span class="badge b-error">${esc(m.note)}</span> ` : "")
+    + esc(m.running ? "Buscando… (va despacio: una serie cada 5 s)"
+      : (m.last_scan ? `Última búsqueda: ${fmt(m.last_scan)}` : "Todavía no se ha buscado.")
+        + (m.not_found && m.not_found.length ? ` · Sin versión en el catálogo: ${m.not_found.join(", ")}` : ""));
+  const badge = (st) => st === "añadido" ? '<span class="badge b-en_cola">Añadido</span>'
+    : st === "falta_tmdb" ? '<span class="badge b-rechazada">FALTA TMDB</span>'
+    : '<span class="badge b-esperando">Pendiente</span>';
   $("missing").innerHTML = m.items.length ? m.items.map((r) => `
     <tr>
       <td><b>${esc(r.folder)}</b><div class="muted">${esc(r.grp || "")}</div></td>
-      <td>${r.count}</td>
-      <td style="max-width:420px">${esc(r.detail)}</td>
-      <td><span class="badge ${r.state === "añadido" ? "b-en_cola" : "b-esperando"}">${r.state === "añadido" ? "Añadido" : "Pendiente"}</span></td>
-      <td class="actions">${r.state === "añadido" ? "" : `<button type="button" data-madd="${esc(r.folder)}">Añadir a la cola</button>`}<button type="button" data-mign="${esc(r.folder)}">Ignorar serie</button></td>
+      <td>${r.state === "falta_tmdb" ? "—" : r.count}</td>
+      <td style="max-width:420px">${r.state === "falta_tmdb" ? "Jellyfin no tiene su número de TMDB: identifícala en Jellyfin (⋮ → Identificar)" : esc(r.detail)}</td>
+      <td>${badge(r.state)}</td>
+      <td class="actions">${r.state === "pendiente" ? `<button type="button" data-madd="${esc(r.folder)}">Añadir a la cola</button>` : ""}<button type="button" data-mign="${esc(r.folder)}">Ignorar serie</button></td>
     </tr>`).join("") : '<tr><td colspan="5" class="muted">No falta ningún episodio.</td></tr>';
   $("completeBox").innerHTML = m.complete
-    ? `Series terminadas y completas (no se revisan durante ${m.complete_days} días): <b>${m.complete}</b> <a href="#" id="recheck">(revisar todas en la próxima búsqueda)</a>`
-    : "";
+    ? `Series completas según Seerr (no se consultan al proveedor): <b>${m.complete}</b>` : "";
   $("ignoredBox").innerHTML = m.ignored.length ? "Series ignoradas: " + m.ignored.map((f) =>
     `${esc(f)} <a href="#" data-munign="${esc(f)}">(dejar de ignorar)</a>`).join(" · ") : "";
 }
