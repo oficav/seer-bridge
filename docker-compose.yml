@@ -1,0 +1,66 @@
+# ============================================================
+#  SEERR-BRIDGE 1.2.2 - Puente entre Seerr y XtreamFilter
+#  Página de control: http://IP-DEL-SERVIDOR:5056  (solo red interna)
+#
+#  Qué hace (resumen; ver AYUDA.md):
+#   - Revisa Seerr cada 5 minutos (configurable en la página).
+#   - Peticiones PENDIENTES de clientes: busca por TMDB en el catálogo
+#     del proveedor (XtreamFilter) y las APRUEBA si hay versión en el idioma
+#     elegido (ES) sin 4K, o las RECHAZA si no existe o no está en ese idioma
+#     (y avisa al cliente en Jellyfin).
+#   - Peticiones APROBADAS: añade la película o los episodios que faltan a la
+#     cola de XtreamFilter (al principio si la opción está activa). Las series
+#     en emisión se añaden además al seguimiento de XtreamFilter.
+#   - Al terminar la descarga: actualiza Jellyfin y (opcional) envía el
+#     archivo a shrinkerr y lo sube al principio de su cola.
+#   - (Opcional) Busca episodios que faltan en las series del disco.
+#
+#  Todos los ajustes (claves de API, reglas, mensajes, modo prueba)
+#  se cambian desde la página web, no aquí.
+# ============================================================
+services:
+  seerr-bridge:
+    # Imagen oficial de Python. El puente solo usa lo que trae Python de serie
+    # (más ffprobe, que se instala solo al arrancar; ver "command").
+    image: python:3.13-alpine
+
+    # Nombre del contenedor.
+    container_name: seerr-bridge
+
+    # Al arrancar: instala ffprobe (ffmpeg, para analizar audio y subtítulos de
+    # las versiones) y su-exec, y lanza el puente como usuario 1000 (el mismo
+    # dueño que /opt/seerr-bridge). La instalación solo descarga algo al crear
+    # el contenedor (unos 40 MB); en un simple reinicio ya está instalado.
+    # Si la instalación falla (p. ej. un corte de red), repara los paquetes
+    # ("apk fix") y lo reintenta hasta 3 veces.
+    # "-u" hace que los mensajes salgan al registro (logs de Portainer) al momento.
+    command: sh -c "for i in 1 2 3; do apk add --no-cache ffmpeg su-exec >/dev/null 2>&1 && break; apk fix --no-cache >/dev/null 2>&1; sleep 5; done; exec su-exec 1000:1000 python -u /app/bridge.py"
+
+    environment:
+      # Zona horaria de los registros.
+      - TZ=America/New_York
+      # Evita que Python cree archivos temporales en /app (es de solo lectura).
+      - PYTHONDONTWRITEBYTECODE=1
+
+    ports:
+      # "puerto_del_servidor:puerto_del_puente". Página web de control.
+      # No publicarlo en internet: la página no tiene contraseña.
+      - "5056:5056"
+
+    volumes:
+      # Programa del puente:
+      #   bridge.py  = la lógica
+      #   index.html = la página web
+      # ":ro" = solo lectura. Si se modifica el programa, reiniciar el contenedor.
+      - /opt/seerr-bridge/app:/app:ro
+
+      # Datos del puente:
+      #   settings.json = ajustes y claves de API (Seerr, Jellyfin, shrinkerr)
+      #   bridge.db     = peticiones, lo añadido a la cola, avisos pendientes,
+      #                   episodios que faltan, series ignoradas y registro
+      # Es lo que hay que guardar en una copia de seguridad.
+      - /opt/seerr-bridge/data:/data
+
+    # Arranca solo al encender el servidor o si falla,
+    # salvo que lo pares tú a mano.
+    restart: unless-stopped

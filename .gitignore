@@ -1,0 +1,7 @@
+# Datos y ajustes del puente (contienen claves de API): nunca se suben
+data/
+settings.json
+bridge.db
+*.db
+__pycache__/
+*.pyc
