@@ -1,6 +1,65 @@
 # Historial de cambios
 
-Versiones de seerr-bridge, de la más reciente a la más antigua. La **versión 1** publicada corresponde a la **1.2.2**. La **versión 2** corresponde a la **1.2.8**.
+Versiones de seerr-bridge, de la más reciente a la más antigua. La **versión 1** publicada corresponde a la **1.2.2**. La **versión 2** corresponde a la **1.2.8**. La **versión 3** corresponde a la **1.2.12**.
+
+## 1.2.12
+
+#### Lista de episodios que faltan
+- El estado **"Añadido"** pasa a llamarse **"En cola"**.
+- Nuevo estado **"Completada"** (verde): todos los episodios añadidos de esa serie ya están en Jellyfin.
+- Antes, las filas "Añadido" se quedaban para siempre aunque todo estuviera descargado.
+- Todo se hace **solo dentro de la búsqueda de episodios que faltan** (diaria o "Buscar ahora"), al empezar y antes de consultar al proveedor (se aplica aunque la búsqueda se cancele):
+  1. Se borran de la lista las filas "Completada" (las marcó la búsqueda anterior).
+  2. Las filas "En cola" cuyos episodios ya están todos en Jellyfin pasan a "Completada".
+- La revisión de cada 5 minutos no toca esta lista.
+- Si una búsqueda encuentra episodios nuevos de una serie "Completada", vuelve a "Pendiente".
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.11
+
+#### Página: colores en los mensajes de estado
+- **Episodios que faltan**, línea de estado:
+  - Mientras busca: en **azul**, con un punto que parpadea: "Buscando… (va despacio: una serie cada 5 s)".
+  - Terminó bien: en **verde**, con el resultado en la misma línea: "✓ Última búsqueda: … · 36 series consultadas, 174 completas según Seerr, 0 sin TMDB, 0 episodios en 0 series" (y "· N añadidos a la cola" si se añadió algo automáticamente).
+  - Series sin versión en el catálogo: en **naranja**.
+  - Cancelada: en **rojo**: "✗ Búsqueda cancelada: … Se volverá a intentar a las …".
+- **Cabecera**: "Revisando…" en azul con el punto que parpadea; "Última revisión…" en gris como antes.
+- Los colores se adaptan al modo claro y oscuro. El resultado se muestra a partir de la próxima búsqueda.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.10
+
+#### Corrección
+- **Compatibilidad con Jellyfin 12**: Jellyfin 12.2 rechaza la clave de API enviada a la forma antigua (cabecera `X-Emby-Token`) con el error *"Jellyfin respondió 401 al pedir las series"*. El puente ahora la envía como `Authorization: MediaBrowser Token="…"`, que funciona en Jellyfin 10 y 12.
+- Afecta a todo lo que el puente pide a Jellyfin: series y películas del disco, búsqueda de episodios que faltan, actualizar la biblioteca, avisos a los clientes y la prueba de conexión.
+- No hay que cambiar la clave ni los ajustes.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
+
+## 1.2.9
+
+#### Peticiones de series de Seerr
+- **Solo cuentan las versiones que tienen lo pedido**: una versión con prefijo (p. ej. `ES -`) solo se elige si tiene episodios de las temporadas pedidas que faltan (no están en Jellyfin ni en la cola).
+- Si ninguna versión con prefijo los tiene, se analizan las **demás versiones que sí los tienen**, sea cual sea su prefijo: audio en tus idiomas (p. ej. SPA, en cualquier pista según el ajuste) y después subtítulos. Se analiza el primer episodio que falta.
+- Si ninguna sirve, se sigue como antes: versión con prefijo y "El proveedor aún no tiene: …", con el resultado del análisis en el Detalle.
+- **Protección del año**: se descartan las versiones de otro idioma cuyo año no coincide (±1) con el de TMDB (errores del catálogo).
+- **Carpeta**: si la serie ya está en Jellyfin, los episodios se guardan en su carpeta, aunque vengan de otra versión (también el seguimiento de series en emisión). El Detalle lo indica: "→ carpeta «…»".
+- Las películas no cambian.
+
+#### Consultas al proveedor
+- **Error de red o DNS** ("No address associated with hostname"…): se esperan 30 s y se repite la consulta una vez. Otros errores (p. ej. 504 por bloqueo) no se repiten.
+
+#### Búsqueda de episodios que faltan
+- Si se cancela (2 fallos seguidos del proveedor), **se vuelve a intentar a los 30 minutos**, dentro de la ventana horaria (antes esperaba al día siguiente). El aviso de la página indica la hora.
+- La elección de versión no cambia: sigue usando la versión de la carpeta.
+
+#### Instalación
+- Solo copiar el programa (`app/`) a `/opt/seerr-bridge/app` y reiniciar el contenedor.
 
 ## 1.2.8
 

@@ -1,4 +1,4 @@
-# Instalación de seerr-bridge 1.2.8
+# Instalación de seerr-bridge 1.2.12
 
 Guía para instalar seerr-bridge en Docker, desplegándolo como **stack de Portainer**.
 
@@ -86,7 +86,7 @@ Comprueba que funciona abriendo en el navegador:
 http://IP-DEL-SERVIDOR:5056
 ```
 
-Debe aparecer la página de seerr-bridge con la etiqueta **v1.2.8** y **MODO PRUEBA**.
+Debe aparecer la página de seerr-bridge con la etiqueta **v1.2.12** y **MODO PRUEBA**.
 
 ---
 

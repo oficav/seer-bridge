@@ -27,6 +27,11 @@
   .b-prueba { color: var(--warn); } .b-en_cola { color: var(--info); } .b-completada { color: var(--ok); }
   .b-esperando { color: var(--muted); } .b-error { color: var(--err); } .b-real { color: var(--ok); }
   .b-rechazada { color: var(--err); } .b-convirtiendo { color: var(--accent); }
+  .st-run { color: var(--info); font-weight: 600; } .st-ok { color: var(--ok); } .st-bad { color: var(--err); font-weight: 600; }
+  .st-warn { color: var(--warn); }
+  .st-run::before { content: "●"; display: inline-block; margin-right: 6px; animation: blink 1.2s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+  @media (prefers-reduced-motion: reduce) { .st-run::before { animation: none; } }
   button.danger, button[data-mign] { color: var(--err); border-color: color-mix(in srgb, var(--err) 55%, var(--line));
                   background: color-mix(in srgb, var(--err) 7%, var(--card)); }
   textarea { width: 100%; font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); resize: vertical; }
@@ -313,6 +318,7 @@ async function loadStatus() {
   const st = await api("/api/status");
   if (st.version) $("version").textContent = "v" + st.version;
   $("runinfo").textContent = st.running ? "Revisando…" : `Última revisión: ${fmt(st.last_run)} · Próxima: ${fmt(st.next_run)}`;
+  $("runinfo").className = st.running ? "st-run" : "muted";
   $("errbox").hidden = !st.last_error;
   $("errtext").textContent = st.last_error || "";
 }
@@ -337,11 +343,16 @@ async function loadLog() {
 
 async function loadMissing() {
   const m = await api("/api/missing");
-  $("missingInfo").innerHTML = (m.note ? `<span class="badge b-error">${esc(m.note)}</span> ` : "")
-    + esc(m.running ? "Buscando… (va despacio: una serie cada 5 s)"
-      : (m.last_scan ? `Última búsqueda: ${fmt(m.last_scan)}` : "Todavía no se ha buscado.")
-        + (m.not_found && m.not_found.length ? ` · Sin versión en el catálogo: ${m.not_found.join(", ")}` : ""));
-  const badge = (st) => st === "añadido" ? '<span class="badge b-en_cola">Añadido</span>'
+  // Azul mientras busca, rojo si se canceló, verde con el resultado si terminó bien
+  const notFound = m.not_found && m.not_found.length
+    ? ` <span class="st-warn">· Sin versión en el catálogo: ${esc(m.not_found.join(", "))}</span>` : "";
+  $("missingInfo").innerHTML = m.running
+    ? `<span class="st-run">Buscando… (va despacio: una serie cada 5 s)</span>`
+    : m.note ? `<span class="st-bad">✗ ${esc(m.note)}</span>`
+    : m.last_scan ? `<span class="st-ok">✓ Última búsqueda: ${fmt(m.last_scan)}${m.result ? " · " + esc(m.result) : ""}</span>${notFound}`
+    : `<span class="muted">Todavía no se ha buscado.</span>`;
+  const badge = (st) => st === "añadido" ? '<span class="badge b-en_cola">En cola</span>'
+    : st === "completada" ? '<span class="badge b-completada">Completada</span>'
     : st === "falta_tmdb" ? '<span class="badge b-rechazada">FALTA TMDB</span>'
     : '<span class="badge b-esperando">Pendiente</span>';
   $("missing").innerHTML = m.items.length ? m.items.map((r) => `

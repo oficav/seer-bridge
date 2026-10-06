@@ -1,4 +1,4 @@
-# Ayuda de seerr-bridge 1.2.8
+# Ayuda de seerr-bridge 1.2.12
 
 seerr-bridge es un **puente** entre **Seerr** (donde los clientes piden películas y series) y **XtreamFilter** (catálogo del proveedor IPTV y cola de descargas). Hace el trabajo que normalmente harían Radarr y Sonarr, pero usando el catálogo del proveedor.
 
@@ -47,7 +47,10 @@ Busca por el **número de TMDB** (da igual que el título esté en inglés o en 
 ```
 
 - **Prefijos** (p. ej. `"ES -","LA -","ESP","ES-"`): se acepta toda versión cuyo título o grupo **empiece** por uno de ellos, tal cual están escritos. Si varias coinciden, gana el prefijo que está antes en la lista y después la más reciente.
-- **Audio y subtítulos**: se leen las pistas de cada versión con **ffprobe** (1-2 s por versión, máximo 8 por petición; en series, el primer episodio de la temporada pedida). Los códigos (`SPA`, `ES`…) se comparan con el idioma de cada pista, sin distinguir mayúsculas. Según el ajuste, cuenta **cualquier pista**, **primero la principal** o **solo la principal** (la marcada por defecto, o la primera).
+- **Series: solo cuentan las versiones que tienen lo pedido.** En una petición de serie, una versión con prefijo solo se elige si tiene episodios de las temporadas pedidas que aún no están en Jellyfin ni en la cola. Si ninguna versión con prefijo los tiene, se analizan las **demás versiones que sí los tienen** (NF, EN, MAX…, sea cual sea su prefijo) buscando audio y después subtítulos en tus idiomas. Si ninguna sirve, se queda con la versión con prefijo y espera ("El proveedor aún no tiene: T3"). Ejemplo: After Life T3 solo está en `NF - After Life`; si tiene una pista SPA, se descarga esa.
+- **Protección del año**: las versiones de otro idioma cuyo nombre lleva un año distinto (±1) al de TMDB se descartan (errores del catálogo, p. ej. `EN - Ben & Holly's Little Kingdom (2009)` con el TMDB de `Kingdom (2025)`).
+- **Carpeta**: si la serie ya está en Jellyfin, los episodios se guardan **en su carpeta** (la que tiene más episodios), aunque vengan de otra versión. En el Detalle aparece *"→ carpeta «ES - After Life (GB) (2019)»"*. Si la serie es nueva, la carpeta lleva el nombre de la versión elegida.
+- **Audio y subtítulos**: se leen las pistas de cada versión con **ffprobe** (1-2 s por versión, máximo 8 por petición; en series, el primer episodio que falta de lo pedido). Los códigos (`SPA`, `ES`…) se comparan con el idioma de cada pista, sin distinguir mayúsculas. Según el ajuste, cuenta **cualquier pista**, **primero la principal** o **solo la principal** (la marcada por defecto, o la primera).
 - **Conexión con el proveedor**: el proveedor admite una sola conexión y una descarga a medias la ocupa **aunque esté en pausa**. Por eso, si hay una descarga a medias, antes de consultar al proveedor el puente pausa la cola (para que no empiece otra), **cancela** esa descarga, hace sus consultas, la **reintenta** (vuelve a "en espera" en su sitio y empieza de cero; no cuenta como reintento) y reanuda la cola si la pausó él. Si la cola la pausaste tú, la deja pausada. Si no hay ninguna descarga a medias, no toca nada. Las pistas de cada versión se recuerdan 24 h.
 - En el **Detalle** de la petición siempre se indica el motivo de la elección: *"(prefijo «ES -» en el grupo)"*, *"(audio SPA)"* o *"(subtítulos SPA)"*, y si hubo análisis, su resultado, p. ej. *"Sin versión con prefijo del idioma preferido. Analizada 1 versión: NF-DO - Furioza (audio SPA ✓)"*. Si coincide un prefijo no se analiza el audio (el prefijo basta).
 
@@ -222,8 +225,10 @@ Una vez al día, dentro de la ventana horaria configurada (o con "Buscar ahora")
 
 - **Misma versión que la carpeta**: si la carpeta es `EN - Lioness`, busca en `EN - Lioness`. Nunca adivina: si el nombre del catálogo no coincide con la carpeta (salvo año/país), la serie aparece como "sin versión en el catálogo".
 - **Despacio**: el proveedor puede **bloquear tu IP** si recibe muchas consultas seguidas (ocurrió con ~40 consultas en 26 s). Por eso se consulta una serie cada 5 s y solo las parciales según Seerr.
-- **Proveedor sin respuesta**: si falla 2 veces seguidas, la búsqueda se cancela sin tocar las listas (aviso en la página y en el registro).
+- **Error de red o DNS** (p. ej. *"No address associated with hostname"*): se esperan 30 s y se repite esa consulta una vez antes de contarla como fallo. Vale para todas las consultas al proveedor.
+- **Proveedor sin respuesta**: si falla 2 veces seguidas, la búsqueda se cancela sin tocar las listas (aviso en la página y en el registro) y **se vuelve a intentar a los 30 minutos**, siempre dentro de la ventana horaria.
 - **FALTA TMDB**: identifica la serie en Jellyfin (⋮ → Identificar) para que Seerr sepa si le faltan episodios.
+- **Estados de la lista**: *Pendiente* (encontrado, sin añadir) → *En cola* (añadido a la cola de XtreamFilter) → *Completada* (todos sus episodios ya están en Jellyfin) → se borra de la lista. Esto se hace **solo al empezar cada búsqueda** (antes de consultar al proveedor, así que se aplica aunque la búsqueda se cancele): primero se borran las filas que la búsqueda anterior marcó como *Completada* y después las filas *En cola* ya descargadas pasan a *Completada*.
 - **Añadir automáticamente**: si está activado, al terminar se añade a la cola todo lo encontrado (al final de la cola).
 - Las series que ya no existen (borradas del disco) se quitan solas de la lista y de las ignoradas.
 

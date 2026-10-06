@@ -18,7 +18,7 @@ import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.8"
+VERSION = "1.2.12"
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -74,6 +74,8 @@ CANCEL_WAIT = 30      # espera máxima a que XtreamFilter confirme la cancelaci�
 PROBE_CACHE_HOURS = 24
 MISSING_DELAY = 5     # segundos entre consulta y consulta al proveedor en la búsqueda de episodios
 MISSING_SETTLE = 15   # segundos de espera tras pausar la cola y antes de reanudarla (conexión libre)
+MISSING_RETRY = 30 * 60  # si la búsqueda se cancela, se vuelve a intentar a los 30 min (dentro de la franja)
+NET_RETRY_WAIT = 30   # error de red/DNS al consultar al proveedor: se espera y se repite una vez
 MISSING_MAX_ERRORS = 2  # fallos seguidos del proveedor que cancelan la búsqueda
 _probe_cache = {}     # url -> (cuándo, audio, subtítulos)
 AUDIO_TRACK_MODES = ("any", "main_first", "main_only")
@@ -254,6 +256,19 @@ def http(method, url, headers=None, body=None, timeout=60):
     return status, payload
 
 
+def is_net_error(st, payload):
+    """Fallo pasajero de red o de DNS (p. ej. "No address associated with hostname"),
+    no un bloqueo del proveedor ni un error de la petición."""
+    text = str(payload or "")
+    return st == 0 or "[Errno -" in text or "name resolution" in text.lower() or "No address associated" in text
+
+
+def jf_auth(s):
+    """Cabecera con la clave de Jellyfin. Jellyfin 12 ya no acepta X-Emby-Token; esta forma
+    (Authorization: MediaBrowser Token=…) funciona en Jellyfin 10 y 12."""
+    return {"Authorization": f'MediaBrowser Token="{s["jellyfin_api_key"]}"'}
+
+
 class Seerr:
     def __init__(self, s):
         self.base = s["seerr_url"].rstrip("/") + "/api/v1"
@@ -314,13 +329,23 @@ class XF:
         self._cart = None
         self._catalog = {}
         self._enabled = None
+        self._eps = {}
 
     def xtream(self, action, **params):
         q = urllib.parse.urlencode({**self.creds, "action": action, **params})
-        st, p = http("GET", f"{self.playlist}?{q}", timeout=120)
-        if st != 200:
+        for attempt in (1, 2):
+            try:
+                st, p = http("GET", f"{self.playlist}?{q}", timeout=120)
+            except OSError as e:  # sin conexión con XtreamFilter (red, DNS)
+                st, p = 0, str(e)
+            if st == 200:
+                return p
+            if attempt == 1 and is_net_error(st, p):
+                log(f"Error de red/DNS al consultar al proveedor ({action}): {p}. Se repite en {NET_RETRY_WAIT} s",
+                    "error")
+                time.sleep(NET_RETRY_WAIT)
+                continue
             raise RuntimeError(f"Lista de títulos ({action}) -> {st}: {p}")
-        return p
 
     def source_of(self, virtual_id):
         """Id de la lista -> (source_id de XtreamFilter, id original)."""
@@ -385,6 +410,12 @@ class XF:
         return [i for i in self.catalog(kind) if tmdb and i["tmdb_id"] == tmdb]
 
     def series_episodes(self, source_id, series_id):
+        key = (str(source_id), str(series_id))
+        if key not in self._eps:
+            self._eps[key] = self._series_episodes(source_id, series_id)
+        return self._eps[key]
+
+    def _series_episodes(self, source_id, series_id):
         if self._enabled is None:
             self.source_of(0)
         vid = self._enabled.index(str(source_id)) * VIRTUAL_ID_OFFSET + int(series_id)
@@ -587,6 +618,74 @@ def _probe(url):
     return json.loads(r.stdout or "{}").get("streams", [])
 
 
+def year_ok(v, year):
+    """Protección contra errores del catálogo (otra serie con el mismo TMDB): si el nombre
+    lleva año y no coincide (±1) con el de TMDB, no se acepta."""
+    years = [int(y) for y in re.findall(r"\((\d{4})\)", v.get("name") or "")]
+    return not year or not years or any(abs(y - year) <= 1 for y in years)
+
+
+def choose_series(versions, s, xf, tmdb, seasons, title, year=None):
+    """Elige la versión de una serie pedida en Seerr. Devuelve (versión o None, motivo, nota).
+
+    1) Prefijo del idioma preferido, pero solo entre las versiones que TIENEN algo de lo
+       pedido que falta (no está en Jellyfin ni en la cola).
+    2) Si ninguna versión con prefijo lo tiene: las demás versiones que lo tienen, sea cual
+       sea su prefijo (y con el año correcto), por audio y después subtítulos.
+    3) Si ninguna versión tiene nada nuevo: como antes (prefijo → audio → subtítulos)."""
+    key = ("series_choice", str(tmdb), tuple(sorted(v["vid"] for v in versions)), tuple(seasons or ()))
+    if key not in _cycle:
+        _cycle[key] = _choose_series(versions, s, xf, tmdb, seasons, title, year)
+    return _cycle[key]
+
+
+def _choose_series(versions, s, xf, tmdb, seasons, title, year):
+    ok4k = [v for v in versions if not (s["exclude_4k"] and is_4k(v))]
+    jf = jf_index(s)
+    have = set(jf["series"].get(str(tmdb), set())) if jf is not None else set()
+    ids = {str(v["id"]) for v in versions}
+    have |= {(int(i.get("season") or 0), int(i.get("episode_num") or 0)) for i in xf.cart()
+             if i.get("content_type") == "series" and str(i.get("series_id")) in ids}
+    seasons = set(seasons or ())
+
+    def new_eps(v):
+        eps = [e for e in xf.series_episodes(v["source_id"], v["id"])
+               if e["season"] > 0 and (not seasons or e["season"] in seasons)
+               and (e["season"], e["episode"]) not in have]
+        return sorted(eps, key=lambda e: (e["season"], e["episode"]))
+
+    pre = sorted([(prefix_match(v, s), v) for v in ok4k if prefix_match(v, s) is not None],
+                 key=lambda x: (x[0][0], -(x[1].get("added") or 0)))
+    rest = [v for v in ok4k if prefix_match(v, s) is None]
+    with free_connection(xf):
+        for m, v in pre:
+            if new_eps(v):
+                return v, f"prefijo «{m[1]}» en el {m[2]}", ""
+        useful, skipped = {}, []
+        for v in sorted(rest, key=lambda v: -(v.get("added") or 0)):
+            if not year_ok(v, year):
+                skipped.append(v["name"])
+                continue
+            eps = new_eps(v)
+            if eps:
+                useful[v["vid"]] = eps[0]
+        if skipped:
+            log(f"«{title}»: versiones descartadas por no coincidir el año ({year}): " + ", ".join(skipped))
+        if useful:
+            cands = [v for v in rest if v["vid"] in useful]
+            prefix_note = ("Ninguna versión con prefijo del idioma preferido tiene lo pedido" if pre
+                           else "Sin versión con prefijo del idioma preferido")
+            c, why, note = _choose(cands, s, xf, "series", seasons, title, first_ep=useful, nopre=prefix_note)
+            if c or not pre:
+                return c, why, note
+            # Ninguna sirve: la versión con prefijo (seguirá esperando lo que falta)
+            c, why, _ = _choose(ok4k, s, xf, "series", seasons, title)
+            return c, why, note
+        # Ninguna versión tiene nada nuevo de lo pedido: se elige como siempre
+        # (después se indicará "ya descargado" o "el proveedor aún no tiene")
+        return _choose(ok4k, s, xf, "series", seasons, title)
+
+
 def choose(versions, s, xf, kind, seasons=None, title=""):
     """Elige la versión: 1) prefijo del idioma preferido  2) audio en los idiomas indicados
     3) subtítulos completos en los idiomas indicados. Devuelve (versión o None, motivo, nota).
@@ -602,18 +701,20 @@ def _no_pause():
     yield
 
 
-def _analysis_note(results):
+def _analysis_note(results, nopre=None):
     n = len(results)
     head = f"Analizada 1 versión" if n == 1 else f"Analizadas {n} versiones"
-    return f"Sin versión con prefijo del idioma preferido. {head}: " + ", ".join(results)
+    return f"{nopre or 'Sin versión con prefijo del idioma preferido'}. {head}: " + ", ".join(results)
 
 
-def _choose(versions, s, xf, kind, seasons, title):
+def _choose(versions, s, xf, kind, seasons, title, first_ep=None, nopre=None):
+    """first_ep: {vid: episodio} que se analiza de cada versión (series): el primero de lo pedido
+    que falta. nopre: texto del Detalle cuando no se usa una versión con prefijo."""
     ok4k = lambda v: not (s["exclude_4k"] and is_4k(v))  # noqa: E731
     c, m = pick(versions, s)  # 1) prefijo: si coincide, se deja de buscar
     if c:
         return c, f"prefijo «{m[1]}» en el {m[2]}", ""
-    nopre = "Sin versión con prefijo del idioma preferido"
+    nopre = nopre or "Sin versión con prefijo del idioma preferido"
     if not (s["probe_audio"] or s["probe_subs"]):
         return None, "", f"{nopre} (el análisis de audio y subtítulos está desactivado)"
     if not shutil.which("ffprobe"):
@@ -636,6 +737,9 @@ def _choose(versions, s, xf, kind, seasons, title):
             try:
                 if kind == "vod":
                     url = xf.stream_url("vod", v["vid"], v.get("container_extension"))
+                elif first_ep and v["vid"] in first_ep:
+                    ep = first_ep[v["vid"]]
+                    url = xf.stream_url("series", ep["vid"], ep["ext"])
                 else:
                     eps = [e for e in xf.series_episodes(v["source_id"], v["id"])
                            if not seasons or e["season"] in seasons] or xf.series_episodes(v["source_id"], v["id"])
@@ -655,7 +759,7 @@ def _choose(versions, s, xf, kind, seasons, title):
                 # 2) audio: según qué pista cuenta
                 if (mode == "any" and audio_any) or (mode != "any" and audio_main):
                     results.append(f"{v['name']} (audio {alang} ✓)")
-                    return v, f"audio {alang}", _analysis_note(results)
+                    return v, f"audio {alang}", _analysis_note(results, nopre)
                 if mode == "main_first" and audio_any:
                     results.append(f"{v['name']} (pista secundaria {alang})")
                     with_audio = with_audio or v
@@ -666,10 +770,10 @@ def _choose(versions, s, xf, kind, seasons, title):
             else:
                 results.append(f"{v['name']} (sin audio ni subtítulos {alang}/{slang})")
     if with_audio is not None:
-        return with_audio, f"pista de audio {alang}", _analysis_note(results)
+        return with_audio, f"pista de audio {alang}", _analysis_note(results, nopre)
     if with_subs is not None and s["probe_subs"]:  # 3) subtítulos
-        return with_subs, f"subtítulos {slang}", _analysis_note(results)
-    return None, "", _analysis_note(results)
+        return with_subs, f"subtítulos {slang}", _analysis_note(results, nopre)
+    return None, "", _analysis_note(results, nopre)
 
 
 def remember_added(content_type, cart_items, rid, name, adopted=False):
@@ -718,18 +822,22 @@ def jf_snapshot(s):
     """
     if not s["jellyfin_api_key"]:
         return None
-    series = {}
-    for info in jellyfin_series(s).values():
+    series, folders = {}, {}
+    for folder, info in jellyfin_series(s).items():
         if info["tmdb"]:
-            series.setdefault(str(info["tmdb"]), set()).update(info["have"])
+            tmdb = str(info["tmdb"])
+            series.setdefault(tmdb, set()).update(info["have"])
+            folders.setdefault(tmdb, []).append((len(info["have"]), folder))
     st, p = http("GET", s["jellyfin_url"].rstrip("/") + "/Items?IncludeItemTypes=Movie&Recursive=true"
                  "&Fields=ProviderIds&EnableImages=false&EnableUserData=false",
-                 {"X-Emby-Token": s["jellyfin_api_key"]}, timeout=300)
+                 jf_auth(s), timeout=300)
     if st != 200:
         raise RuntimeError(f"Jellyfin respondió {st} al pedir las películas")
     movies = {str((i.get("ProviderIds") or {}).get("Tmdb")) for i in p.get("Items", [])
               if (i.get("ProviderIds") or {}).get("Tmdb")}
-    return {"series": series, "movies": movies}
+    # Carpeta de cada serie (si hay varias, la que tiene más episodios)
+    folders = {t: max(lst)[1] for t, lst in folders.items()}
+    return {"series": series, "movies": movies, "folders": folders}
 
 
 def jf_index(s):
@@ -798,7 +906,7 @@ def process_movie(req, s, seerr, xf, dry):
     return ST_QUEUED, f"{intro}Añadida a la cola: {label}", label
 
 
-def ensure_monitor(choice, tmdb, xf, dry):
+def ensure_monitor(choice, tmdb, xf, dry, folder=None):
     for m in xf.monitors():
         refs = {str(m.get("series_id"))} | {str(x.get("series_ref")) for x in m.get("monitor_sources") or []}
         if str(m.get("tmdb_id") or "") == str(tmdb) or str(choice["id"]) in refs:
@@ -808,13 +916,20 @@ def ensure_monitor(choice, tmdb, xf, dry):
     st, p = xf.post("/api/monitor", {
         "series_name": choice["name"], "series_id": str(choice["id"]), "source_id": choice["source_id"],
         "source_name": choice.get("source_name"), "source_category": choice.get("group"),
-        "cover": choice.get("icon", ""), "tmdb_id": str(tmdb),
+        "cover": choice.get("icon", ""), "tmdb_id": str(tmdb), "canonical_name": folder or choice["name"],
         "scope": "new_only", "action": "download", "backfill": "none",
     })
     if st != 200:
         raise RuntimeError(f"XtreamFilter no aceptó el seguimiento ({st}): {p}")
     log(f"Serie añadida al seguimiento de XtreamFilter: {choice['name']}")
     return "añadida al seguimiento de XtreamFilter", ((p or {}).get("entry") or {}).get("id")
+
+
+def first_year(info):
+    try:
+        return int(str(info.get("firstAirDate") or "")[:4])
+    except ValueError:
+        return None
 
 
 def process_tv(req, s, seerr, xf, dry):
@@ -832,21 +947,28 @@ def process_tv(req, s, seerr, xf, dry):
     versions = xf.by_tmdb("series", tmdb)
     if not versions:
         return ST_WAITING, "No existe en el catálogo del proveedor", None
-    choice, why, note = choose(versions, s, xf, "series", wanted, title)
+    choice, why, note = choose_series(versions, s, xf, tmdb, wanted, title, first_year(info))
     if not choice:
         found = ", ".join(sorted({v["name"].split(" - ")[0] for v in versions}))
         return ST_WAITING, (f"{note or f'Sin versión en el idioma preferido (hay: {found})'}. "
                             f"Se volverá a buscar en {s['retry_hours']} h"), None
     label = f"{choice['name']} | {choice.get('group')}" + (f" ({why})" if why else "")
 
-    with free_connection(xf):
-        all_eps = xf.series_episodes(choice["source_id"], choice["id"])
+    if (str(choice["source_id"]), str(choice["id"])) in xf._eps:
+        all_eps = xf.series_episodes(choice["source_id"], choice["id"])  # ya consultada al elegir
+    else:
+        with free_connection(xf):
+            all_eps = xf.series_episodes(choice["source_id"], choice["id"])
     eps = [e for e in all_eps if e["season"] in wanted_left]
     version_ids = {str(v["id"]) for v in versions}
     # Lo que ya tienes: en Jellyfin (cualquier carpeta de esta serie) o completado en la
     # cola (Jellyfin aún no lo ha visto). Lo borrado se vuelve a descargar (se ha pedido).
     jf = jf_index(s)
     have = set(jf["series"].get(tmdb, set())) if jf is not None else set()
+    # Si la serie ya está en el disco, lo nuevo va a SU carpeta (aunque sea de otra versión)
+    folder = (jf or {}).get("folders", {}).get(tmdb) or choice["name"]
+    if norm(folder) != norm(choice["name"]):
+        label += f" → carpeta «{folder}»"
     have |= {(int(i.get("season") or 0), int(i.get("episode_num") or 0)) for i in xf.cart()
              if i.get("content_type") == "series" and str(i.get("series_id")) in version_ids
              and i.get("status") == "completed"}
@@ -868,7 +990,7 @@ def process_tv(req, s, seerr, xf, dry):
         else:
             st, p = xf.post("/api/cart", {
                 "content_type": "series", "add_mode": "episodes", "source_id": choice["source_id"],
-                "series_id": str(choice["id"]), "series_name": choice["name"],
+                "series_id": str(choice["id"]), "series_name": folder,
                 "icon": choice.get("icon", ""), "group": choice.get("group", ""),
                 "episode_ids": [e["id"] for e in todo],
             })
@@ -894,7 +1016,7 @@ def process_tv(req, s, seerr, xf, dry):
     if missing_seasons:
         parts.append("El proveedor aún no tiene: " + ", ".join(f"T{n}" for n in missing_seasons))
     if not ended and s["monitor_returning"]:
-        txt, monitor_id = ensure_monitor(choice, tmdb, xf, dry)
+        txt, monitor_id = ensure_monitor(choice, tmdb, xf, dry, folder)
         parts.append("En emisión: " + txt)
         if monitor_id:
             set_request(rid, monitor_id=monitor_id)
@@ -919,12 +1041,16 @@ def availability(req, s, seerr, xf):
         versions = xf.by_tmdb("vod", tmdb)
         seasons = None
     else:
-        title = seerr.tv(tmdb).get("name") or f"TMDB {tmdb}"
+        info = seerr.tv(tmdb)
+        title = info.get("name") or f"TMDB {tmdb}"
         versions = xf.by_tmdb("series", tmdb)
         seasons = sorted({int(x["seasonNumber"]) for x in req.get("seasons", [])} - {0})
     if not versions:
         return title, "not_found", "no existe en el catálogo del proveedor"
-    choice, _, note = choose(versions, s, xf, "vod" if req["type"] == "movie" else "series", seasons, title)
+    if req["type"] == "movie":
+        choice, _, note = choose(versions, s, xf, "vod", seasons, title)
+    else:
+        choice, _, note = choose_series(versions, s, xf, tmdb, seasons, title, first_year(info))
     if not choice:
         return title, "no_language", note or "no hay versión en el idioma preferido"
     return title, None, ""
@@ -981,7 +1107,7 @@ def deliver_notices():
         pending = [dict(r) for r in c.execute("SELECT * FROM notices WHERE delivered IS NULL")]
     if not pending:
         return
-    base, h = s["jellyfin_url"].rstrip("/"), {"X-Emby-Token": s["jellyfin_api_key"]}
+    base, h = s["jellyfin_url"].rstrip("/"), jf_auth(s)
     st, sessions = http("GET", base + "/Sessions?activeWithinSeconds=900", h, timeout=20)
     if st != 200:
         return
@@ -1142,7 +1268,7 @@ def track_downloads(s):
                           "WHERE content_type = ? AND stream_id = ?", (r["content_type"], r["stream_id"]))
     if newly and not s["dry_run"] and s["jellyfin_refresh"] and s["jellyfin_api_key"]:
         st, p = http("POST", s["jellyfin_url"].rstrip("/") + "/Library/Refresh",
-                     {"X-Emby-Token": s["jellyfin_api_key"]})
+                     jf_auth(s))
         if st in (200, 204):
             log(f"Jellyfin: biblioteca actualizada ({newly} descargas terminadas)")
         else:
@@ -1211,7 +1337,7 @@ def shrinkerr_step():
                 log(f"Shrinkerr: {r['name']} → {new}")
     if converted and s["jellyfin_refresh"] and s["jellyfin_api_key"]:
         st, _ = http("POST", s["jellyfin_url"].rstrip("/") + "/Library/Refresh",
-                     {"X-Emby-Token": s["jellyfin_api_key"]})
+                     jf_auth(s))
         if st in (200, 204):
             log(f"Jellyfin: biblioteca actualizada ({converted} conversiones terminadas)")
     update_converting_states()
@@ -1325,7 +1451,7 @@ def episodes_text(eps):
 
 def jellyfin_series(s):
     """Series de Jellyfin: {carpeta: {"tmdb": id, "have": {(temporada, episodio)}}}."""
-    base, h = s["jellyfin_url"].rstrip("/"), {"X-Emby-Token": s["jellyfin_api_key"]}
+    base, h = s["jellyfin_url"].rstrip("/"), jf_auth(s)
     st, p = http("GET", base + "/Items?IncludeItemTypes=Series&Recursive=true&Fields=Path,ProviderIds", h, timeout=120)
     if st != 200:
         raise RuntimeError(f"Jellyfin respondió {st} al pedir las series")
@@ -1427,6 +1553,31 @@ def missing_scan(s):
             log("Episodios que faltan: cola de XtreamFilter reanudada")
 
 
+def update_queued_rows(series):
+    """Antes de consultar al proveedor (no depende de él):
+    1) se borran de la lista las filas "Completada" (las marcó la búsqueda anterior);
+    2) las filas "En cola" cuyos episodios ya están todos en Jellyfin pasan a "Completada"."""
+    have_by_tmdb = {}
+    for info in series.values():
+        if info["tmdb"]:
+            have_by_tmdb.setdefault(str(info["tmdb"]), set()).update(info["have"])
+    with db() as c:
+        removed = [r[0] for r in c.execute("SELECT folder FROM missing WHERE state = 'completada'")]
+        c.execute("DELETE FROM missing WHERE state = 'completada'")
+        done = []
+        for r in c.execute("SELECT folder, episodes FROM missing WHERE state = 'añadido'").fetchall():
+            info = series.get(r[0]) or {}
+            have = have_by_tmdb.get(str(info.get("tmdb")), set()) | info.get("have", set())
+            eps = {(e["season"], e["episode"]) for e in json.loads(r[1] or "[]")}
+            if eps and eps <= have:
+                done.append(r[0])
+        c.executemany("UPDATE missing SET state = 'completada' WHERE folder = ?", [(f,) for f in done])
+    if removed:
+        log("Episodios que faltan: quitadas de la lista (completadas en la búsqueda anterior): " + ", ".join(removed))
+    if done:
+        log("Episodios que faltan: completadas (todos sus episodios ya están en Jellyfin): " + ", ".join(done))
+
+
 def _missing_scan(s, xf):
     started = time.time()
     series = jellyfin_series(s)
@@ -1441,6 +1592,7 @@ def _missing_scan(s, xf):
         ignored = {r[0] for r in c.execute("SELECT folder FROM ignored")}
     if gone_ign:
         log("Series ignoradas que ya no existen, quitadas de la lista: " + ", ".join(gone_ign))
+    update_queued_rows(series)
     # Series parcialmente disponibles según Seerr (compara Jellyfin con TMDB)
     seerr = Seerr(s)
     partial = {str(m.get("tmdbId")) for m in seerr.get("/media?filter=partial&take=5000").get("results", [])
@@ -1487,10 +1639,13 @@ def _missing_scan(s, xf):
             found[folder] = (version, eps)
             total += len(eps)
     if errors_in_row >= MISSING_MAX_ERRORS:
-        meta_set("missing_last_scan", time.time())  # se reintentará en la próxima búsqueda programada
-        meta_set("missing_note", f"Búsqueda cancelada: el proveedor falló {MISSING_MAX_ERRORS} veces seguidas")
+        again = time.time() + MISSING_RETRY
+        meta_set("missing_retry_at", again)  # se vuelve a intentar a los 30 min, dentro de la franja horaria
+        when = time.strftime("%I:%M %p", time.localtime(again)).lstrip("0")
+        meta_set("missing_note", f"Búsqueda cancelada: el proveedor falló {MISSING_MAX_ERRORS} veces seguidas. "
+                                 f"Se volverá a intentar a las {when} (dentro de la franja horaria)")
         log(f"Episodios que faltan: búsqueda cancelada (el proveedor falló {MISSING_MAX_ERRORS} veces seguidas); "
-            "las listas no se han tocado", "error")
+            f"las listas no se han tocado. Se volverá a intentar a las {when} (dentro de la franja horaria)", "error")
         return
 
     with db() as c:
@@ -1504,15 +1659,19 @@ def _missing_scan(s, xf):
                        len(eps), episodes_text([(e["season"], e["episode"]) for e in eps]),
                        (old.get(folder) or {}).get("found") or time.time()))
         for folder in no_tmdb:
-            if (old.get(folder) or {}).get("state") == "añadido":
+            if (old.get(folder) or {}).get("state") in ("añadido", "completada"):
                 continue
             c.execute("INSERT OR REPLACE INTO missing (folder, series_name, count, state, detail, found) "
                       "VALUES (?, ?, 0, 'falta_tmdb', 'FALTA TMDB', ?)",
                       (folder, folder, (old.get(folder) or {}).get("found") or time.time()))
     meta_set("missing_last_scan", time.time())
+    meta_set("missing_retry_at", 0)
     meta_set("missing_not_found", json.dumps(sorted(not_found), ensure_ascii=False))
     meta_set("missing_complete", complete)
     meta_set("missing_note", "")
+    result = (f"{queried} series consultadas, {complete} completas según Seerr, {len(no_tmdb)} sin TMDB, "
+              f"{total} episodios en {len(found)} series")
+    meta_set("missing_result", result)  # se muestra en la página junto a "Última búsqueda"
     log(f"Episodios que faltan: {queried} series consultadas (parciales según Seerr), {complete} completas "
         f"según Seerr, {len(no_tmdb)} sin TMDB, {total} episodios en {len(found)} series"
         + (f", {len(not_found)} sin versión en el catálogo" if not_found else "")
@@ -1527,6 +1686,7 @@ def _missing_scan(s, xf):
             except Exception as e:  # noqa: BLE001
                 log(f"Episodios que faltan: no se pudo añadir {row['folder']}: {e}", "error")
         log(f"Episodios que faltan: {added} episodios añadidos a la cola automáticamente")
+        meta_set("missing_result", f"{result} · {added} añadidos a la cola")
 
 
 def hhmm(text, default):
@@ -1546,6 +1706,8 @@ def missing_due(s):
     inside = start <= minute < end if start <= end else (minute >= start or minute < end)
     if not inside:
         return False
+    if float(meta_get("missing_retry_at", 0) or 0) > time.time():
+        return False  # búsqueda cancelada hace poco: se espera a la hora del reintento
     last = float(meta_get("missing_last_scan", 0) or 0)
     if not last:
         return True
@@ -1680,7 +1842,7 @@ def test_connection(which, s):
                 return True, f"Conectado a Seerr {p.get('version', '')}"
             return False, f"Seerr respondió {st} (¿clave de API correcta?)"
         if which == "jellyfin":
-            st, p = http("GET", s["jellyfin_url"] + "/System/Info", {"X-Emby-Token": s["jellyfin_api_key"]}, timeout=15)
+            st, p = http("GET", s["jellyfin_url"] + "/System/Info", jf_auth(s), timeout=15)
             if st == 200:
                 return True, f"Conectado a {p.get('ServerName', 'Jellyfin')} {p.get('Version', '')}"
             return False, f"Jellyfin respondió {st} (¿clave de API correcta?)"
@@ -1762,7 +1924,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"items": rows, "ignored": ign, "last_scan": float(last) if last else None,
                             "not_found": json.loads(meta_get("missing_not_found", "[]")),
                             "running": bool(_status.get("missing_running")),
-                            "complete": ncomplete, "note": meta_get("missing_note", "") or ""})
+                            "complete": ncomplete, "note": meta_get("missing_note", "") or "",
+                            "result": meta_get("missing_result", "") or ""})
         elif path == "/api/log":
             with db() as c:
                 rows = [dict(r) for r in c.execute("SELECT * FROM log ORDER BY id DESC LIMIT 200")]

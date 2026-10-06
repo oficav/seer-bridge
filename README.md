@@ -2,7 +2,7 @@
 
 Puente entre **[Seerr](https://github.com/seerr-team/seerr)** (peticiones de películas y series) y **[XtreamFilter](https://github.com/SpanishST/xtreamfilter)** (catálogo de un proveedor IPTV y cola de descargas). Hace el trabajo que normalmente harían Radarr y Sonarr, pero usando el catálogo del proveedor.
 
-**Versión 2** (1.2.8)
+**Versión 3** (1.2.12)
 
 ## Cómo encaja cada pieza
 
@@ -58,6 +58,9 @@ Cada petición se busca en el catálogo del proveedor por su **número de TMDB**
 - **Prefijos**: se comparan con el principio del título o del grupo, tal cual los escribes. El orden de la lista es la preferencia; si varias versiones coinciden, gana la más reciente.
 - **Audio y subtítulos**: se leen las pistas de cada versión con **ffprobe**. Puedes elegir si cuenta **cualquier pista**, **primero la principal** o **solo la principal**.
 - En la columna **Detalle** se ve siempre por qué se eligió: *"(prefijo «ES -» en el grupo)"*, *"(audio SPA)"* o *"(subtítulos SPA)"*.
+- **Series: solo cuentan las versiones que tienen lo pedido.** Si la versión con prefijo no tiene la temporada pedida, se analizan las demás versiones que sí la tienen (NF, EN, MAX…), buscando audio y después subtítulos en tus idiomas. Ejemplo: *After Life* T3 solo existía en `NF - After Life`: se analizó y se descargó.
+- **Misma carpeta**: si la serie ya está en Jellyfin, los episodios nuevos se guardan en **su carpeta**, aunque vengan de otra versión.
+- **Protección del año**: se descartan versiones de otro idioma cuyo año no coincide con TMDB (errores del catálogo).
 - **Aprueba o rechaza** la petición en Seerr y **avisa al cliente en Jellyfin** (mensajes personalizables).
 - Añade lo pedido a la **cola de XtreamFilter**, al principio si quieres, sin duplicar lo que ya tienes (comprueba Jellyfin y la cola).
 - Las **series en emisión** se añaden al seguimiento de XtreamFilter para descargar los episodios nuevos.
@@ -73,17 +76,20 @@ Una vez al día, en la franja horaria que elijas (o con "Buscar ahora"):
 - No vuelve a añadir lo que ya está en Jellyfin o en la cola.
 - Muestra lo que falta o lo añade a la cola automáticamente.
 - Mientras busca, pausa la cola de XtreamFilter y espera 15 s antes y después. Al terminar reintenta las descargas con error y reanuda la cola.
+- Si la búsqueda se cancela (el proveedor falla 2 veces seguidas), se vuelve a intentar a los **30 minutos**, dentro de la franja horaria. Un error de red o DNS se repite una vez tras 30 s.
+- Estados de la lista: **Pendiente** → **En cola** → **Completada** (todo ya en Jellyfin) → se borra de la lista en la siguiente búsqueda.
 
 ### Una sola conexión con el proveedor
 Muchos proveedores admiten **una sola conexión**. Antes de consultar al proveedor, el puente libera la conexión. Después deja la cola como estaba; si la pausaste tú, no la toca.
 
 ### Página de control
-En el puerto 5056: peticiones, episodios que faltan, registro y ajustes.
+En el puerto 5056: peticiones, episodios que faltan, registro y ajustes. Los mensajes de estado llevan color: **azul** mientras trabaja, **verde** con el resultado al terminar, **rojo** si se canceló.
 
 ## Requisitos
 - Docker (recomendado Portainer).
 - [Seerr](https://github.com/seerr-team/seerr), [XtreamFilter](https://github.com/SpanishST/xtreamfilter) y [Jellyfin](https://github.com/jellyfin/jellyfin). Opcional: [shrinkerr](https://github.com/i-ial9000/shrinkerr).
 - El proveedor debe dar el número de TMDB en su catálogo.
+- Compatible con **Jellyfin 10 y 12** (desde la 1.2.10).
 
 ## Instalación rápida
 1. Crear `/opt/seerr-bridge/app` y `/opt/seerr-bridge/data` (dueño: usuario 1000).
